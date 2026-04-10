@@ -1,6 +1,7 @@
 import datetime
 import hashlib
 import json
+import random
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
@@ -260,15 +261,37 @@ class Wallet:
 
 
 class Blockchain:
-    def __init__(self, difficulty=3, mining_reward=25.0, node_id="local-node"):
+    def __init__(
+        self,
+        difficulty=3,
+        mining_reward=25.0,
+        node_id="local-node",
+        initial_wallet_address=None,
+    ):
         self.node_id = node_id
         self.difficulty = difficulty
         self.mining_reward = float(mining_reward)
         self.chain = [self.init_genesis_block()]
         self.pending_transactions = []
 
+        if initial_wallet_address:
+            self._create_initial_funding_block(initial_wallet_address)
+
     def init_genesis_block(self):
         return Block(0, [], "0", timestamp=GENESIS_TIMESTAMP)
+
+    def _create_initial_funding_block(self, wallet_address):
+        initial_amount = float(random.randint(50, 100))
+        initial_transaction = Transaction(
+            sender_address=SYSTEM_SENDER,
+            recipient_address=wallet_address,
+            amount=initial_amount,
+            timestamp=utc_now(),
+        )
+
+        block = Block(1, [initial_transaction], self.get_latest_block().hash)
+        block.mine_block(self.difficulty)
+        self.chain.append(block)
 
     def get_latest_block(self):
         return self.chain[-1]
@@ -331,6 +354,11 @@ class Blockchain:
     def mine_pending_transactions(self, miner_address):
         if not miner_address:
             raise ValueError("Miner address is required.")
+
+        if not self.pending_transactions and len(self.chain) > 1:
+            raise ValueError(
+                "Cannot mine without pending transactions after the first block."
+            )
 
         for transaction in self.pending_transactions:
             is_valid, message = self.validate_transaction(
@@ -420,14 +448,23 @@ class Blockchain:
                 for transaction in current.transactions
                 if transaction.sender_address == SYSTEM_SENDER
             ]
-            if len(reward_transactions) != 1:
-                return False, f"Block {current.index} must contain exactly one reward transaction."
 
-            if reward_transactions[0].amount != self.mining_reward:
-                return False, f"Block {current.index} reward amount is invalid."
+            is_bootstrap_block = (
+                current.index == 1
+                and len(current.transactions) == 1
+                and len(reward_transactions) == 1
+                and 50 <= reward_transactions[0].amount <= 100
+            )
 
-            if current.transactions[-1].sender_address != SYSTEM_SENDER:
-                return False, f"Block {current.index} reward transaction must be placed last."
+            if not is_bootstrap_block:
+                if len(reward_transactions) != 1:
+                    return False, f"Block {current.index} must contain exactly one reward transaction."
+
+                if reward_transactions[0].amount != self.mining_reward:
+                    return False, f"Block {current.index} reward amount is invalid."
+
+                if current.transactions[-1].sender_address != SYSTEM_SENDER:
+                    return False, f"Block {current.index} reward transaction must be placed last."
 
             for transaction in current.transactions:
                 is_signature_valid, message = transaction.validate_signature()

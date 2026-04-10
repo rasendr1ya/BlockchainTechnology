@@ -14,7 +14,11 @@ class NodeState:
         self.port = port
         self.node_url = f"http://{host}:{port}"
         self.wallet = Wallet(owner_name=f"Node {port}")
-        self.blockchain = Blockchain(node_id=self.node_url)
+        bootstrap_wallet = self.wallet.address if port == 5001 else None
+        self.blockchain = Blockchain(
+            node_id=self.node_url,
+            initial_wallet_address=bootstrap_wallet,
+        )
         self.peer_nodes = set()
         self.register_nodes(peers or [])
 
@@ -216,16 +220,17 @@ def create_app(host, port, peers):
     @app.post("/transactions/new")
     def create_transaction():
         payload = request.get_json(silent=True) or {}
+        is_full_payload = {
+            "sender_address",
+            "recipient_address",
+            "amount",
+            "timestamp",
+            "signature",
+            "public_key",
+        }.issubset(payload)
 
         try:
-            if {
-                "sender_address",
-                "recipient_address",
-                "amount",
-                "timestamp",
-                "signature",
-                "public_key",
-            }.issubset(payload):
+            if is_full_payload:
                 transaction = Transaction.from_dict(payload)
             else:
                 recipient_address = payload["recipient_address"]
@@ -237,6 +242,18 @@ def create_app(host, port, peers):
             return error_response("Transaction amount must be numeric.", 400)
 
         added, message = node.blockchain.add_transaction(transaction)
+
+        # For transactions received from peers, try to sync chain once if sender
+        # balance is unknown locally but may exist on a longer valid peer chain.
+        if (
+            not added
+            and is_full_payload
+            and message == "Insufficient spendable balance."
+            and node.peer_nodes
+        ):
+            node.resolve_chain()
+            added, message = node.blockchain.add_transaction(transaction)
+
         status_code = 201 if added else 400
         return jsonify(
             {
